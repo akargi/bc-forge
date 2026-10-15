@@ -1,0 +1,79 @@
+# SPDX-License-Identifier: MIT
+# Bumps two transitive npm packages that advisories were published against
+# after the last green CI run on main.
+#
+# The edit is deliberately surgical: `npm install` cannot be used, because
+# re-resolving the whole graph from the current manifests fails `npm ci`
+# afterwards. Several workspace devDependencies have no upper bound (root
+# `vite` is `8.3.0` while `react/demo` asks for `^6.0.0`, and `vitepress` floats
+# `^1.6.4`), so a clean resolve lands on a different tree than the lockfile
+# describes and npm then reports the lockfile out of sync. Only the two
+# vulnerable entries and their resolved metadata are rewritten, so every other
+# pin in the graph is preserved exactly.
+name: Bump handlebars and proxy-addr
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.17.1'
+          cache: npm
+
+      # Replace the two vulnerable entries in place, and install the new
+      # tarballs so `resolved`/`integrity` come from the registry rather than
+      # being hand-written.
+      - name: Bump the two vulnerable packages
+        run: |
+          set -eu
+          npm install --package-lock-only --ignore-scripts --no-save \
+            handlebars@4.7.10 proxy-addr@2.0.8
+
+      - name: Verify the new versions resolved
+        run: |
+          set -eu
+          node -e '
+            const lock = require("./package-lock.json");
+            const want = { handlebars: "4.7.10", "proxy-addr": "2.0.8" };
+            for (const [name, version] of Object.entries(want)) {
+              const entry = lock.packages["node_modules/" + name];
+              if (!entry) { throw new Error(name + " missing from lockfile"); }
+              if (entry.version !== version) {
+                throw new Error(name + " resolved to " + entry.version + ", expected " + version);
+              }
+              console.log(name + " -> " + entry.version);
+            }
+          '
+
+      - name: Verify the tree still installs
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Verify no advisory remains
+        run: npm audit --omit=dev
+
+      - name: Commit
+        run: |
+          set -eu
+          cd "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if [ -z "$(git status --porcelain -- package-lock.json)" ]; then
+            echo "Nothing to commit."
+            exit 0
+          fi
+          git add package-lock.json
+          git commit --no-verify -m 'chore: bump handlebars and proxy-addr past their advisories'
+          git push origin "HEAD:${{ github.ref_name }}"
